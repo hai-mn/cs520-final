@@ -1,0 +1,369 @@
+---
+title: "Matching"
+author: "Hai Nguyen"
+date: "Last compiled on `r format(Sys.time(), '%d %B, %Y')`"
+knit: (function(input, ...) {
+    rmarkdown::render(
+      input,
+      output_file = paste0(
+        xfun::sans_ext(input), '-', Sys.Date(), '.html'
+      ),
+      output_dir = "../Output"
+    )
+  })
+output: 
+  rmarkdown::html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 4
+    #code_folding: hide
+    smart: true
+    indent: true
+    theme: united
+    highlight: kate
+    df_print: paged
+---
+
+## Variable selection in PS
+
+__Selecting the Covariates__  
+
+  - Ideally, include covariates/variables $X$ that are related to (1) <span style="color:orange">treatment</span> and (2) outcomes    
+      <span style="color:orange">• Continuous covariates are difficult to match, so categorize</span>    
+      
+  - Trade-off problem:    
+      <span style="color:orange">• Too many covariates might be difficult to match and increase the variability</span>    
+      <span style="color:orange">• Excluding important confounders might lead to biased results</span>     
+      
+  - Do not include variables that might be affected by treatment    
+      <span style="color:orange">• Exclude from matching, but consider later in the outcome analysis</span>    
+
+-- *Cody Chiuzan, PROPENSITY SCORE MATCHING A PRACTICAL TUTORIAL, March 19, 2018. Biostatistics, Epidemiology and Research Design (BERD) Lecture*   
+
+<br />
+
+  <ul> <li style="list-style-type: none;">One type of variable that should not be included in the matching process are those that may have been affected by the treatment of interest. This is especially important when the covariates, treatment indicator, and outcomes are all collected at the same point in time. If it is deemed to be critical to control for a variable potentially affected by treatment assignment, it is better to exclude that variable in the matching procedure and include it in the analysis model for the outcome.</li> </ul>
+
+-- *Elizabeth A. Stuart, Matching methods for causal inference: A review and a look forward, 2010. Stat Sci.*
+
+<br />
+
+  <ul> <li style="list-style-type: none;">... suggest that variables that are unrelated to the exposure but related to the outcome should always be included in a PS model. The inclusion of these variables will increase the precision of the estimated exposure effect without increasing bias. In contrast, including variables that are related to the exposure but not the outcome will decrease the precision of the estimated exposure effect without decreasing bias.</li> </ul>   
+  
+-- *M. Alan Brookhart, Variable selection for propensity score models 2007. Am J Epidemiol*
+
+
+## To-do
+
+- Propensity Score Matching
+
+## Load packages and data
+```{r load packages, warning=F, message=F}
+library(readxl) # read Excel
+library(DT)## column filters in DT
+library(psych) # describe by group
+library(tidyverse)
+library(hrbrthemes) #theme_ipsum
+library(kableExtra)
+library(reshape2) #melt
+library(tableone) #CreateTableOne
+library(DOS2)
+library(optmatch)
+hr.b <- readRDS(file = "../Data/HR_ready4analyze.Rds")
+
+```
+
+## Propensity score
+
+The propensity score is estimated using a logit model. I decided to include those variables in PS model:  
+  - `loc`   
+  - `loc`   
+  - `age`   
+  - `bmi`  
+  - `female`   
+  - `race.ethnicity`  
+  - **Not** put `vo2` in PS model   
+  
+```{r ps}
+# Estimate the propensity score
+z<-hr.b$chd
+zf<-factor(z,levels=c(1,0),labels=c("chd","control"))
+table(zf)
+
+X<-hr.b[,c("loc","age","bmi","female","race.ethnicity")]
+
+hr.b$race.ethnicity <- ifelse(is.na(hr.b$race.ethnicity), "unknown", hr.b$race.ethnicity)
+hr.b$race.ethnicity.miss <- ifelse(hr.b$race.ethnicity == "unknown", 1, 0)
+
+fit <- glm(
+  chd ~ as.factor(loc) + female + as.factor(race.ethnicity) + age + I(age^2) +
+    bmi + I(bmi^2) + race.ethnicity.miss,
+  family = binomial(),
+  data = hr.b
+)
+summary(fit)
+ps <- fit$fitted.values
+hr.b$ps<-ps
+```
+
+```{r boxplot}
+boxplot(ps~zf, ylab="Propensity score", main="Exercise Cohort")
+```
+
+## Table 1 before Matching
+```{r}
+xvars <- c("loc","age","bmi","female","race.ethnicity","ps")
+hr.table1 <- hr.b
+hr.table1$ps <- ps
+#look at a table 1
+table1<- CreateTableOne(vars=xvars,strata="chd", data=hr.table1, test=FALSE)
+## include standardized mean difference (SMD)
+print(table1,smd=TRUE)
+```
+
+## Matching 1:1
+```{r smahal}
+hr.b$loc <- as.numeric(as.factor(hr.b$loc))
+hr.b$race.ethnicity <- as.numeric(as.factor(hr.b$race.ethnicity))
+X<-hr.b[ , c("loc","age","bmi","female","race.ethnicity")]
+#Robust Mahalanobis distance matrix, treated x control
+dmat<-smahal(z,X)
+dim(dmat)
+
+kable(round(dmat[1:5,1:5],2), caption="First five rows and columns of the 145×320 distance matrix using the rank-based Mahalanobis distance") %>%
+  kable_styling(bootstrap_options = "striped", full_width = F)
+```
+
+```{r}
+#Add a caliper (.2xsd(PS))on the propensity score using a penalty function
+dmat <- addcaliper(dmat, z, ps, caliper=.2)
+```
+
+```{r}
+pm <- optmatch::pairmatch(dmat,data=hr.b)
+```
+
+```{r}
+# Housekeepers
+ipm <- as.integer(pm)
+hr.pm <- cbind(hr.b, matches=pm,ipm)
+df.pm<-hr.pm[matched(pm),] # only select matched cases
+
+chd.data <- df.pm %>%
+  filter(chd==1) %>%
+  arrange(ipm)
+
+matched.controls <- df.pm %>%
+  filter(chd==0) %>%
+  arrange(ipm)
+
+table1.matched<- CreateTableOne(vars=xvars,strata="chd", data=df.pm, test=FALSE)
+## include standardized mean difference (SMD)
+print(table1.matched, smd=TRUE)
+```
+
+### Write matched data out
+```{r, eval=FALSE}
+## write to Excel (only execute one)
+openxlsx::write.xlsx(df.pm, "../data/Matched_1-1_HRExercise.xlsx")
+saveRDS(df.pm, file="../data/Matched_1-1_HRExercise.Rds")
+```
+
+## Compare
+
+### Resting HR
+```{r hr rest, warning=F, message=F}
+describe(df.pm$m0)
+describeBy(df.pm$m0, group=df.pm$chd)
+df.pm %>%
+  ggplot(aes(x=m0, fill=factor(chd))) +
+    geom_histogram( color="#e9ecef", alpha=0.6, position = 'identity') +
+    scale_fill_manual(values=c("#69b3a2", "#404080")) +
+    theme_ipsum() +
+    labs(fill="")
+boxplot(df.pm$m0 ~ df.pm$chd,ylab="HR Rest",xlab="CHD",main="Exercise Study")
+t.test(df.pm$m0 ~ df.pm$chd)
+wilcox.test(df.pm$m0 ~ df.pm$chd)
+```
+
+### HR peak
+```{r hr peak, warning=F, message=F}
+describe(df.pm$hr.max.achieved)
+describeBy(df.pm$hr.max.achieved, group=df.pm$chd)
+df.pm %>%
+  ggplot(aes(x=hr.max.achieved, fill=factor(chd))) +
+    geom_histogram( color="#e9ecef", alpha=0.6, position = 'identity') +
+    scale_fill_manual(values=c("#69b3a2", "#404080")) +
+    theme_ipsum() +
+    labs(fill="")
+boxplot(df.pm$hr.max.achieved ~ df.pm$chd,ylab="HR Peak", xlab="CHD", main="Exercise Study")
+t.test(df.pm$hr.max.achieved ~ df.pm$chd)
+wilcox.test(df.pm$hr.max.achieved ~ df.pm$chd)
+```
+
+### HR reserve
+```{r hr res, warning=F, message=F}
+df.pm$hr.res <- df.pm$hr.max.achieved - df.pm$m0
+
+describe(df.pm$hr.res)
+describeBy(df.pm$hr.res, group=df.pm$chd)
+
+df.pm %>%
+  ggplot(aes(x=hr.res, fill=factor(chd))) +
+    geom_histogram( color="#e9ecef", alpha=0.6, position = 'identity') +
+    scale_fill_manual(values=c("#69b3a2", "#404080")) +
+    theme_ipsum() +
+    labs(fill="")
+boxplot(df.pm$hr.res ~ df.pm$chd,ylab="HR Reserve",xlab="CHD", main="Exercise Study")
+t.test(df.pm$hr.res ~ df.pm$chd)
+wilcox.test(df.pm$hr.res ~ df.pm$chd)
+```
+
+### HR recovery
+```{r hr rec, warning=F, message=F}
+df.pm$hr.rec1 <- df.pm$hr.max.achieved - df.pm$r1
+df.pm$hr.rec2 <- df.pm$hr.max.achieved - df.pm$r2
+df.pm$hr.rec3 <- df.pm$hr.max.achieved - df.pm$r3
+df.pm$hr.rec4 <- df.pm$hr.max.achieved - df.pm$r4
+df.pm$hr.rec5 <- df.pm$hr.max.achieved - df.pm$r5
+df.pm$hr.rec6 <- df.pm$hr.max.achieved - df.pm$r6
+
+describe(df.pm$hr.rec1)
+describeBy(df.pm$hr.rec1, group=df.pm$chd)
+df.pm %>%
+  ggplot(aes(x=hr.rec1, fill=factor(chd))) +
+    geom_histogram( color="#e9ecef", alpha=0.6, position = 'identity') +
+    scale_fill_manual(values=c("#69b3a2", "#404080")) +
+    theme_ipsum() +
+    labs(fill="")
+boxplot(df.pm$hr.rec1 ~ df.pm$chd,ylab="HR Recover 1m",xlab="CHD", main="Exercise Study")
+t.test(df.pm$hr.rec1 ~ df.pm$chd)
+wilcox.test(df.pm$hr.rec1 ~ df.pm$chd)
+
+describe(df.pm$hr.rec2)
+describeBy(df.pm$hr.rec2, group=df.pm$chd)
+df.pm %>%
+  ggplot(aes(x=hr.rec2, fill=factor(chd))) +
+    geom_histogram( color="#e9ecef", alpha=0.6, position = 'identity') +
+    scale_fill_manual(values=c("#69b3a2", "#404080")) +
+    theme_ipsum() +
+    labs(fill="")
+boxplot(df.pm$hr.rec2 ~ df.pm$chd,ylab="HR Recover 2m",xlab="CHD", main="Exercise Study")
+t.test(df.pm$hr.rec2 ~ df.pm$chd)
+wilcox.test(df.pm$hr.rec2 ~ df.pm$chd)
+
+describe(df.pm$hr.rec3)
+describeBy(df.pm$hr.rec3, group=df.pm$chd)
+df.pm %>%
+  ggplot(aes(x=hr.rec3, fill=factor(chd))) +
+    geom_histogram( color="#e9ecef", alpha=0.6, position = 'identity') +
+    scale_fill_manual(values=c("#69b3a2", "#404080")) +
+    theme_ipsum() +
+    labs(fill="")
+boxplot(df.pm$hr.rec3 ~ df.pm$chd,ylab="HR Recover 3m",xlab="CHD", main="Exercise Study")
+t.test(df.pm$hr.rec3 ~ df.pm$chd)
+wilcox.test(df.pm$hr.rec3 ~ df.pm$chd)
+
+describe(df.pm$hr.rec4)
+describeBy(df.pm$hr.rec4, group=df.pm$chd)
+df.pm %>%
+  ggplot(aes(x=hr.rec4, fill=factor(chd))) +
+    geom_histogram( color="#e9ecef", alpha=0.6, position = 'identity') +
+    scale_fill_manual(values=c("#69b3a2", "#404080")) +
+    theme_ipsum() +
+    labs(fill="")
+boxplot(df.pm$hr.rec4 ~ df.pm$chd, ylab="HR Recover 4m", xlab="CHD", main="Exercise Study")
+t.test(df.pm$hr.rec4 ~ df.pm$chd)
+wilcox.test(df.pm$hr.rec4 ~ df.pm$chd)
+
+describe(df.pm$hr.rec5)
+describeBy(df.pm$hr.rec5, group=df.pm$chd)
+df.pm %>%
+  ggplot(aes(x=hr.rec5, fill=factor(chd))) +
+    geom_histogram( color="#e9ecef", alpha=0.6, position = 'identity') +
+    scale_fill_manual(values=c("#69b3a2", "#404080")) +
+    theme_ipsum() +
+    labs(fill="")
+boxplot(df.pm$hr.rec5 ~ df.pm$chd,ylab="HR Recover 5m",xlab="CHD", main="Exercise Study")
+t.test(df.pm$hr.rec5 ~ df.pm$chd)
+wilcox.test(df.pm$hr.rec5 ~ df.pm$chd)
+
+describe(df.pm$hr.rec6)
+describeBy(df.pm$hr.rec6, group=df.pm$chd)
+df.pm %>%
+  ggplot(aes(x=hr.rec6, fill=factor(chd))) +
+    geom_histogram( color="#e9ecef", alpha=0.6, position = 'identity') +
+    scale_fill_manual(values=c("#69b3a2", "#404080")) +
+    theme_ipsum() +
+    labs(fill="")
+boxplot(df.pm$hr.rec6 ~ df.pm$chd,ylab="HR Recover 6m",xlab="CHD", main="Exercise Study")
+t.test(df.pm$hr.rec6 ~ df.pm$chd)
+wilcox.test(df.pm$hr.rec6 ~ df.pm$chd)
+```
+
+
+### Relative heart rate recovery
+```{r rhrr manipulate, warning=F, message=F}
+# Relative heart rate recovery: ratio of heart rate in recovery to the peak heart rate at each minute 
+df.pm$rhrr1 <- df.pm$r1/df.pm$hr.max.achieved
+df.pm$rhrr2 <- df.pm$r2/df.pm$hr.max.achieved
+df.pm$rhrr3 <- df.pm$r3/df.pm$hr.max.achieved
+df.pm$rhrr4 <- df.pm$r4/df.pm$hr.max.achieved
+df.pm$rhrr5 <- df.pm$r5/df.pm$hr.max.achieved
+df.pm$rhrr6 <- df.pm$r6/df.pm$hr.max.achieved
+
+
+tab.rhrr <- df.pm %>%
+  group_by(chd) %>%
+  summarise_at(vars("rhrr1":"rhrr6"), funs(mean(., na.rm=TRUE), sd(., na.rm=TRUE)))
+round(tab.rhrr*100, 1)
+
+df.pm.rhrr <- df.pm %>%
+  select(id, serNum, chd, rhrr1, rhrr2, rhrr3, rhrr4, rhrr5, rhrr6)
+
+df.pm.rhrr.long <- melt(df.pm.rhrr, id.vars = c("id","serNum", "chd"),
+    variable.name = "min", value.name = "rhrr")
+
+
+boxplot(rhrr ~ chd, ylab="Relative HR Recovery 1m",xlab="CHD",main="Exercise Study", data = df.pm.rhrr.long, subset = min=="rhrr1")
+t.test(rhrr ~ chd, data = df.pm.rhrr.long, subset = min=="rhrr1")
+wilcox.test(rhrr ~ chd, data = df.pm.rhrr.long, subset = min=="rhrr1")
+
+boxplot(rhrr ~ chd, ylab="Relative HR Recovery 1m",xlab="CHD",main="Exercise Study", data = df.pm.rhrr.long, subset = min=="rhrr2")
+t.test(rhrr ~ chd, data = df.pm.rhrr.long, subset = min=="rhrr2")
+wilcox.test(rhrr ~ chd, data = df.pm.rhrr.long, subset = min=="rhrr2")
+
+boxplot(rhrr ~ chd, ylab="Relative HR Recovery 1m",xlab="CHD",main="Exercise Study", data = df.pm.rhrr.long, subset = min=="rhrr3")
+t.test(rhrr ~ chd, data = df.pm.rhrr.long, subset = min=="rhrr3")
+wilcox.test(rhrr ~ chd, data = df.pm.rhrr.long, subset = min=="rhrr3")
+
+boxplot(rhrr ~ chd, ylab="Relative HR Recovery 1m",xlab="CHD",main="Exercise Study", data = df.pm.rhrr.long, subset = min=="rhrr4")
+t.test(rhrr ~ chd, data = df.pm.rhrr.long, subset = min=="rhrr4")
+wilcox.test(rhrr ~ chd, data = df.pm.rhrr.long, subset = min=="rhrr4")
+
+boxplot(rhrr ~ chd, ylab="Relative HR Recovery 1m",xlab="CHD",main="Exercise Study", data = df.pm.rhrr.long, subset = min=="rhrr5")
+t.test(rhrr ~ chd, data = df.pm.rhrr.long, subset = min=="rhrr5")
+wilcox.test(rhrr ~ chd, data = df.pm.rhrr.long, subset = min=="rhrr5")
+
+boxplot(rhrr ~ chd, ylab="Relative HR Recovery 1m",xlab="CHD",main="Exercise Study", data = df.pm.rhrr.long, subset = min=="rhrr6")
+t.test(rhrr ~ chd, data = df.pm.rhrr.long, subset = min=="rhrr6")
+wilcox.test(rhrr ~ chd, data = df.pm.rhrr.long, subset = min=="rhrr6")
+```
+
+
+### Chronotropic index
+```{r Chronotropic index, warning=F, message=F}
+describe(df.pm$chronotropic.index)
+describeBy(df.pm$chronotropic.index, group=df.pm$chd)
+
+df.pm %>%
+  ggplot(aes(x=chronotropic.index, fill=factor(chd))) +
+    geom_histogram( color="#e9ecef", alpha=0.6, position = 'identity') +
+    scale_fill_manual(values=c("#69b3a2", "#404080")) +
+    theme_ipsum() +
+    labs(fill="")
+
+boxplot(df.pm$chronotropic.index ~ df.pm$chd,ylab="Chronotropic Index", xlab="CHD", main="Exercise Study")
+t.test(df.pm$chronotropic.index ~ df.pm$chd)
+wilcox.test(df.pm$chronotropic.index ~ df.pm$chd)
+```

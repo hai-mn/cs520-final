@@ -1,0 +1,410 @@
+---
+title: "IPTW"
+author: "Hai Nguyen"
+date: "Last compiled on `r format(Sys.time(), '%d %B, %Y')`"
+knit: (function(input, ...) {
+    rmarkdown::render(
+      input,
+      output_file = paste0(
+        xfun::sans_ext(input), '-', Sys.Date(), '.html'
+      ),
+      output_dir = "../Output"
+    )
+  })
+output: 
+  rmarkdown::html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 4
+    #code_folding: hide
+    smart: true
+    theme: united
+    highlight: kate
+    df_print: paged
+---
+## To do
+
+  - To conduct an IPTW
+
+```{r}
+#install.packages("geepack") # install package if required
+library("geepack")
+```
+
+
+```{r}
+hr.b <- readRDS("../Data/HR_ready4analyze.Rds")
+# names(hr.b)
+# str(hr.b)
+table(hr.b$race.ethnicity, useNA = "always")
+sum(is.na(hr.b$age))
+sum(is.na(hr.b$bmi))
+table(hr.b$loc, useNA = "always")
+```
+
+## Modeling PS
+
+  *... one can fit a very complicated propensity score model with interactions and higher order terms first. Since the goal of this propensity score model is to obtain the best estimated probability of treatment assignment, one is not concerned with over-parameterizing this model.*
+  -- D'Agostino (quoting Rosenbaum and Rubin); D’agostino, R.B. 1998. Propensity score matching for bias reduction in the comparison of a treatment to a non-randomized control group. Statistical Medicine 17: 2265-2281.
+  
+```{r}
+# Estimation of ip weights via a logistic model
+fit <- glm(
+  chd ~ as.factor(loc) + female + as.factor(race.ethnicity) + age + I(age^2) +
+    bmi + I(bmi^2),
+  family = binomial(),
+  data = hr.b
+)
+summary(fit)
+
+
+hr.b$race.ethnicity <- ifelse(is.na(hr.b$race.ethnicity), "unknown", hr.b$race.ethnicity)
+table(hr.b$race.ethnicity, useNA = "always")
+hr.b$race.ethnicity.miss <- ifelse(hr.b$race.ethnicity == "unknown", 1, 0)
+table(hr.b$race.ethnicity.miss, useNA = "always")
+fit <- glm(
+  chd ~ as.factor(loc) + female + as.factor(race.ethnicity) + age + I(age^2) +
+    bmi + I(bmi^2) + race.ethnicity.miss,
+  family = binomial(),
+  data = hr.b
+)
+summary(fit)
+# hr.b$white.miss <- ifelse(hr.b$white == '.', 1, 0)
+# hr.b$hispanic.miss <- ifelse(hr.b$hispanic == '.', 1, 0)
+# hr.b$white <- ifelse(is.na(hr.b$white), 2, hr.b$white)
+# 
+# hr.b$hispanic <- ifelse(is.na(hr.b$hispanic), 2, hr.b$hispanic)
+# 
+# table(hr.b$white.miss, useNA = "always")
+# table(hr.b$hispanic.miss, useNA = "always")
+# table(hr.b$white, useNA = "always")
+# table(hr.b$white, useNA = "always")
+# 
+# fit <- glm(
+#   chd ~ as.factor(white) + as.factor(hispanic) + white.miss + hispanic.miss + 
+#     female + 
+#     age + I(age^2) +
+#     bmi + I(bmi^2),
+#   family = binomial(),
+#   data = hr.b
+# )
+# summary(fit)
+
+```
+
+```{r}
+z<-hr.b$chd
+zf<-factor(z,levels=c(1,0),labels=c("chd","control"))
+table(zf)
+ps <- fit$fitted.values
+hr.b$ps<-ps
+boxplot(ps~zf, ylab="Propensity score", main="Exercise Cohort")
+hr.b %>%
+  ggplot(aes(x=ps, fill=factor(chd))) +
+    geom_boxplot()
+library(tidyverse)
+library(hrbrthemes) #theme_ipsum
+hr.b %>%
+  ggplot(aes(x=ps, fill=factor(chd))) +
+    geom_histogram( color="#e9ecef", alpha=0.6, position = 'identity') +
+    scale_fill_manual(values=c("#69b3a2", "#404080")) +
+    
+    theme_ipsum() +
+    labs(fill="")
+```
+
+```{r}
+ggplot(hr.b, aes(x = ps, fill = as.factor(chd), color = as.factor(chd))) +
+  geom_histogram(alpha = 0.3, position = 'identity', bins=15) +
+  facet_grid(as.factor(chd) ~ .) +
+  xlab('Probability of CHD') +
+  ggtitle('Propensity Score Distribution by CHD Group') +
+  scale_fill_discrete('') +
+  scale_color_discrete('') +
+  theme(legend.position = 'bottom', legend.direction = 'vertical')
+```
+
+```{r}
+# attempt to reproduce plot from the book
+# gg<-
+hr.b %>%
+  mutate(ps.grp = round(ps/0.05) * 0.05) %>%
+  group_by(chd, ps.grp) %>%
+  summarize(n = n()) %>%
+  ungroup() %>%
+  mutate(n2 = ifelse(chd == 0, yes = n, no =  -1*n)) %>%
+  ggplot(aes(x = ps.grp, y = n2, fill = as.factor(chd))) +
+  geom_bar(stat = 'identity', position = 'identity') +
+  geom_text(aes(label = n, x = ps.grp, y = n2 + ifelse(chd == 0, 8, -8))) +
+  xlab('Probability of CHD') +
+  ylab('N') +
+  ggtitle('Propensity Score Distribution by CHD-Control Groups') +
+  scale_fill_discrete('') +
+  scale_x_continuous(breaks = seq(0, 1, 0.05)) +
+  theme(legend.position = 'bottom', legend.direction = 'vertical',
+        axis.ticks.y = element_blank(),
+        axis.text.y = element_blank())
+
+# ggsave(filename = "PS Dist by Grps-CHD dataset.PNG", gg, width = 8, height = 5, dpi = 300, units = "in", device = "png")
+```
+
+
+## Estimating non-stabilized IP weights
+```{r}
+p.chd.obs <-
+  ifelse(hr.b$chd == 0,
+         1 - predict(fit, type = "response"),
+         predict(fit, type = "response"))
+```
+
+```{r}
+hr.b$p.chd.obs <- p.chd.obs
+hr.b$wATE <- 1 / p.chd.obs
+summary(hr.b$wATE)
+sd(hr.b$wATE)
+```
+
+```{r}
+hr.b$wATT <- hr.b$chd+p.chd.obs*(1-hr.b$chd)/(1-p.chd.obs)
+summary(hr.b$wATT)
+sd(hr.b$wATT)
+```
+
+```{r}
+msm.lm <- lm(chronotropic.index ~ chd, data = hr.b)
+summary(msm.lm)
+
+msm.wATE <- geeglm(
+  chronotropic.index ~ chd,
+  data = hr.b,
+  weights = wATE,
+  id = id,
+  corstr = "independence"
+)
+summary(msm.wATE)
+
+msm.wATT <- geeglm(
+  chronotropic.index ~ chd,
+  data = hr.b,
+  weights = wATT,
+  id = id,
+  corstr = "independence"
+)
+summary(msm.wATT)
+beta <- coef(msm.wATT)
+SE <- coef(summary(msm.wATT))[, 2]
+lcl <- beta - qnorm(0.975) * SE
+ucl <- beta + qnorm(0.975) * SE
+cbind(beta, lcl, ucl)
+```
+
+## Estimating stabilized IP weights
+
+```{r}
+# estimation of denominator of ip weights
+denom.fit <- 
+  glm(
+    chd ~ as.factor(loc) + female + as.factor(race.ethnicity) + age + I(age^2) +
+    bmi + I(bmi^2) + race.ethnicity.miss,
+  family = binomial(),
+  data = hr.b
+)
+summary(denom.fit)
+```
+
+```{r}
+pd.chd <- predict(denom.fit, type = "response")
+
+# estimation of numerator of ip weights
+numer.fit <- glm(chd ~ 1, family = binomial(), data = hr.b)
+summary(numer.fit)
+```
+
+```{r}
+pn.chd <- predict(numer.fit, type = "response")
+
+hr.b$sw <-
+  ifelse(hr.b$chd == 0, ((1 - pn.chd) / (1 - pd.chd)),
+         (pn.chd / pd.chd))
+
+summary(hr.b$sw)
+```
+```{r}
+msm.sw <- geeglm(
+  chronotropic.index ~ chd,
+  data = hr.b,
+  weights = sw,
+  id = id,
+  corstr = "independence"
+)
+summary(msm.sw)
+```
+
+### Resting HR
+```{r}
+msm.sw <- geeglm(
+  m0 ~ chd,
+  data = hr.b,
+  weights = sw,
+  id = id,
+  corstr = "independence"
+)
+summary(msm.sw)
+beta <- coef(msm.sw)
+SE <- coef(summary(msm.sw))[, 2]
+lcl <- beta - qnorm(0.975) * SE
+ucl <- beta + qnorm(0.975) * SE
+cbind(beta, lcl, ucl)
+```
+
+### HR peak
+```{r}
+msm.sw <- geeglm(
+  hr.max.achieved ~ chd,
+  data = hr.b,
+  weights = sw,
+  id = id,
+  corstr = "independence"
+)
+summary(msm.sw)
+
+beta <- coef(msm.sw)
+SE <- coef(summary(msm.sw))[, 2]
+lcl <- beta - qnorm(0.975) * SE
+ucl <- beta + qnorm(0.975) * SE
+cbind(beta, lcl, ucl)
+```
+
+
+### HR reserve
+```{r}
+hr.b$hr.res <- hr.b$hr.max.achieved - hr.b$m0
+msm.sw <- geeglm(
+  hr.res ~ chd,
+  data = hr.b,
+  weights = sw,
+  id = id,
+  corstr = "independence"
+)
+summary(msm.sw)
+
+beta <- coef(msm.sw)
+SE <- coef(summary(msm.sw))[, 2]
+lcl <- beta - qnorm(0.975) * SE
+ucl <- beta + qnorm(0.975) * SE
+cbind(beta, lcl, ucl)
+```
+
+
+### HR recovery
+
+```{r}
+hr.b$hr.rec1 <- hr.b$hr.max.achieved - hr.b$r1
+hr.b$hr.rec2 <- hr.b$hr.max.achieved - hr.b$r2
+hr.b$hr.rec3 <- hr.b$hr.max.achieved - hr.b$r3
+
+# msm.sw <- geeglm(
+#   hr.rec1 ~ chd,
+#   data = hr.b,
+#   weights = sw,
+#   id = id,
+#   corstr = "independence"
+# )
+# summary(msm.sw)
+# 
+# beta <- coef(msm.sw)
+# SE <- coef(summary(msm.sw))[, 2]
+# lcl <- beta - qnorm(0.975) * SE
+# ucl <- beta + qnorm(0.975) * SE
+# cbind(beta, lcl, ucl)
+
+
+# msm.sw <- geeglm(
+#   hr.rec2 ~ chd,
+#   data = hr.b,
+#   weights = sw,
+#   id = id,
+#   corstr = "independence"
+# )
+# summary(msm.sw)
+# 
+# beta <- coef(msm.sw)
+# SE <- coef(summary(msm.sw))[, 2]
+# lcl <- beta - qnorm(0.975) * SE
+# ucl <- beta + qnorm(0.975) * SE
+# cbind(beta, lcl, ucl)
+
+
+msm.sw <- geeglm(
+  hr.rec3 ~ chd,
+  data = hr.b,
+  weights = sw,
+  id = id,
+  corstr = "independence"
+)
+summary(msm.sw)
+
+beta <- coef(msm.sw)
+SE <- coef(summary(msm.sw))[, 2]
+lcl <- beta - qnorm(0.975) * SE
+ucl <- beta + qnorm(0.975) * SE
+cbind(beta, lcl, ucl)
+```
+
+### Relative heart rate recovery
+```{r}
+hr.b$rhrr1 <- hr.b$r1/hr.b$hr.max.achieved
+hr.b$rhrr2 <- hr.b$r2/hr.b$hr.max.achieved
+hr.b$rhrr3 <- hr.b$r3/hr.b$hr.max.achieved
+msm.sw <- geeglm(
+  rhrr3 ~ chd,
+  data = hr.b,
+  weights = sw,
+  id = id,
+  corstr = "independence"
+)
+summary(msm.sw)
+
+beta <- coef(msm.sw)
+SE <- coef(summary(msm.sw))[, 2]
+lcl <- beta - qnorm(0.975) * SE
+ucl <- beta + qnorm(0.975) * SE
+cbind(beta, lcl, ucl)
+```
+
+### Chronotropic index
+```{r}
+msm.sw <- geeglm(
+  chronotropic.index ~ chd,
+  data = hr.b,
+  weights = sw,
+  id = id,
+  corstr = "independence"
+)
+summary(msm.sw)
+
+beta <- coef(msm.sw)
+SE <- coef(summary(msm.sw))[, 2]
+lcl <- beta - qnorm(0.975) * SE
+ucl <- beta + qnorm(0.975) * SE
+cbind(beta, lcl, ucl)
+```
+
+### Chronotropic index
+```{r}
+msm.sw <- geeglm(
+  vo2 ~ chd,
+  data = hr.b,
+  weights = sw,
+  id = id,
+  corstr = "independence"
+)
+summary(msm.sw)
+
+beta <- coef(msm.sw)
+SE <- coef(summary(msm.sw))[, 2]
+lcl <- beta - qnorm(0.975) * SE
+ucl <- beta + qnorm(0.975) * SE
+cbind(beta, lcl, ucl)
+```
+

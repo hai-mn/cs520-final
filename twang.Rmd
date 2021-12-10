@@ -1,0 +1,123 @@
+---
+title: "twang"
+author: "Hai Nguyen"
+date: "11/28/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+#install.packages("twang")
+library(twang)
+```
+
+```{r}
+## fit gbm and extract propensity score weights
+#str(hr.b)
+hr.b$age2 <- hr.b$age^2
+hr.b$bmi2 <- hr.b$bmi^2
+hr.b$loc <- as.factor(hr.b$loc)
+hr.b$race.ethnicity <- as.factor(hr.b$race.ethnicity)
+hr.b <- as.data.frame(hr.b)
+my.ps_bin <- ps(chd ~ loc + female + race.ethnicity + age + age2 +
+    bmi + bmi2 + race.ethnicity.miss, 
+                data = hr.b ,
+                estimand = "ATT",
+                n.trees = 10000,
+                shrinkage = 0.001,
+                stop.method ="es.max")
+```
+
+```{r}
+plot(my.ps_bin)
+```
+
+```{r}
+summary(my.ps_bin)
+```
+
+```{r}
+bal.table(my.ps_bin)
+```
+
+```{r}
+plot(my.ps_bin, plots = 1) #plots = "optimize",
+plot(my.ps_bin, plots = 2)
+plot(my.ps_bin, plots = 3)
+plot(my.ps_bin, plots = 4)
+plot(my.ps_bin, plots = 5)
+plot(my.ps_bin, plots = 6)
+
+```
+
+
+```{r}
+z<-hr.b$chd
+zf<-factor(z,levels=c(1,0),labels=c("chd","control"))
+table(zf)
+ps <- my.ps_bin$fitted.values
+hr.b$ps<-ps
+boxplot(ps~zf, ylab="Propensity score", main="Exercise Cohort")
+library(tidyverse)
+library(hrbrthemes) #theme_ipsum
+hr.b %>%
+  ggplot(aes(x=ps, fill=factor(chd))) +
+    geom_histogram( color="#e9ecef", alpha=0.6, position = 'identity') +
+    scale_fill_manual(values=c("#69b3a2", "#404080")) +
+    theme_ipsum() +
+    labs(fill="")
+```
+
+```{r}
+ggplot(hr.b, aes(x = ps, fill = as.factor(chd), color = as.factor(chd))) +
+  geom_histogram(alpha = 0.3, position = 'identity', bins=15) +
+  facet_grid(as.factor(chd) ~ .) +
+  xlab('Probability of CHD') +
+  ggtitle('Propensity Score Distribution by CHD Group') +
+  scale_fill_discrete('') +
+  scale_color_discrete('') +
+  theme(legend.position = 'bottom', legend.direction = 'vertical')
+```
+
+```{r}
+# attempt to reproduce plot from the book
+# gg<-
+hr.b %>%
+  mutate(ps.grp = round(ps/0.05) * 0.05) %>%
+  group_by(chd, ps.grp) %>%
+  summarize(n = n()) %>%
+  ungroup() %>%
+  mutate(n2 = ifelse(chd == 0, yes = n, no =  -1*n)) %>%
+  ggplot(aes(x = ps.grp, y = n2, fill = as.factor(chd))) +
+  geom_bar(stat = 'identity', position = 'identity') +
+  geom_text(aes(label = n, x = ps.grp, y = n2 + ifelse(chd == 0, 8, -8))) +
+  xlab('Probability of CHD') +
+  ylab('N') +
+  ggtitle('Propensity Score Distribution by CHD-Control Groups') +
+  scale_fill_discrete('') +
+  scale_x_continuous(breaks = seq(0, 1, 0.05)) +
+  theme(legend.position = 'bottom', legend.direction = 'vertical',
+        axis.ticks.y = element_blank(),
+        axis.text.y = element_blank())
+
+# ggsave(filename = "PS Dist by Grps-CHD dataset.PNG", gg, width = 8, height = 5, dpi = 300, units = "in", device = "png")
+```
+
+
+```{r}
+# use survey package - install if not already installed
+# install.packages("survey")
+library(survey)
+# extract the propensity score weights
+hr.b$w <- get.weights(my.ps_bin, estimand = "ATT",
+stop.method = "es.max")
+# use svyglm to incorporate weights
+design.ps <- svydesign(ids = ~1, weights = ~w, data = hr.b)
+glm1 <- svyglm(chronotropic.index ~ chd, design = design.ps)
+summary(glm1)
+beta <- coef(glm1)
+SE <- coef(summary(glm1))[, 2]
+lcl <- beta - qnorm(0.975) * SE
+ucl <- beta + qnorm(0.975) * SE
+cbind(beta, lcl, ucl)
+```
+
